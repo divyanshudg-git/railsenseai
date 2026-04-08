@@ -1,26 +1,22 @@
 from __future__ import annotations
 
+import json
 import pickle
-import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
-from joblib.externals import cloudpickle as bundled_cloudpickle
-from joblib.externals.cloudpickle import cloudpickle as bundled_cloudpickle_impl
 from ptad_runtime import PTADv2Runtime
 
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "ptad_v2_4_tuned.pkl"
+MODEL_STATE_PATH = BASE_DIR / "model_state.json"
 FRONTEND_DIST = BASE_DIR / "public"
 if not FRONTEND_DIST.exists():
     FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
-
-sys.modules["cloudpickle"] = bundled_cloudpickle
-sys.modules["cloudpickle.cloudpickle"] = bundled_cloudpickle_impl
 
 RAW_DEFAULTS: Dict[str, float] = {
     "TP2": 8.2,
@@ -62,6 +58,26 @@ REQUIRED_COLUMNS: List[str] = list(FEATURE_DEFAULTS.keys())
 
 
 def load_model() -> Any:
+    runtime_model = PTADv2Runtime()
+    if MODEL_STATE_PATH.exists():
+        with MODEL_STATE_PATH.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        runtime_model.fitted = bool(state.get("fitted", runtime_model.fitted))
+        runtime_model.feature_cols = list(state.get("feature_cols", runtime_model.feature_cols))
+        runtime_model.all_features = list(state.get("all_features", runtime_model.all_features))
+        for name in ["physics", "temporal", "statistical", "fusion", "alert"]:
+            part = state.get(name)
+            if isinstance(part, dict):
+                getattr(runtime_model, name).__dict__.update(part)
+        return runtime_model
+
+    # Local fallback for legacy pickle loading.
+    from joblib.externals import cloudpickle as bundled_cloudpickle
+    from joblib.externals.cloudpickle import cloudpickle as bundled_cloudpickle_impl
+    import sys as runtime_sys
+
+    runtime_sys.modules["cloudpickle"] = bundled_cloudpickle
+    runtime_sys.modules["cloudpickle.cloudpickle"] = bundled_cloudpickle_impl
     with MODEL_PATH.open("rb") as handle:
         legacy_model = pickle.load(handle)
     return PTADv2Runtime.from_legacy(legacy_model)
