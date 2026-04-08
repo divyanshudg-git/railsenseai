@@ -1,0 +1,16 @@
+.vercel/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Data / generated
+outputs/
+MetroPT3_AirCompressor.csv
+*.log

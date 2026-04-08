@@ -1,0 +1,5 @@
+Event #,Type,Start Time,End Time,Severity,Maintenance Action
+1,Air Leak,2020-04-18 00:00,2020-04-18 23:59,High Stress,Manual intervention
+2,Air Leak,2020-05-29 23:30,2020-05-30 06:00,High Stress,Maintenance on May 30 at 12:00
+3,Air Leak,2020-06-05 10:00,2020-06-07 14:30,High Stress,Maintenance on June 8 at 16:00
+4,Air Leak,2020-07-15 14:30,2020-07-15 19:00,High Stress,Maintenance on July 16 at 00:00

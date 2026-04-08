@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PTAD Orbit Console</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+        <div>
+          <p class="eyebrow">Reliability Stack</p>
+          <h1>PTAD Orbit</h1>
+        </div>
+      </div>
+
+      <div class="nav-card">
+        <p class="eyebrow">Mission</p>
+        <h2>Compressor fault intelligence</h2>
+        <p class="muted">Single-case triage, scenario simulation, and batch scoring backed by your tuned PTAD artifact.</p>
+      </div>
+
+      <div class="stat-column">
+        <div class="mini-stat">
+          <span>Model</span>
+          <strong>PTAD v2.4</strong>
+        </div>
+        <div class="mini-stat">
+          <span>Threshold</span>
+          <strong>{{ threshold }}</strong>
+        </div>
+        <div class="mini-stat">
+          <span>Fusion Mix</span>
+          <strong>P {{ weights.physics }} / T {{ weights.temporal }} / S {{ weights.statistical }}</strong>
+        </div>
+      </div>
+
+      <div class="sidebar-panel">
+        <p class="eyebrow">Presets</p>
+        <button class="scenario-button" type="button" data-preset="calm">Calm baseline</button>
+        <button class="scenario-button" type="button" data-preset="stress">Thermal stress</button>
+        <button class="scenario-button" type="button" data-preset="leak">Leak suspicion</button>
+      </div>
+    </aside>
+
+    <main class="main-shell">
+      <section class="hero-panel glass-panel">
+        <div class="hero-copy">
+          <p class="eyebrow">Operations Console</p>
+          <h2>Interactive anomaly cockpit for MetroPT3 diagnostics</h2>
+          <p class="muted">A richer control-room UI with guided scenarios, instant signal breakdowns, and batch surveillance for uploaded datasets.</p>
+          <div class="hero-actions">
+            <button id="heroAnalyze" class="primary-button" type="button">Run live analysis</button>
+            <button id="heroBatch" class="secondary-button" type="button">Open batch scoring</button>
+          </div>
+        </div>
+
+        <div class="hero-visual">
+          <div class="orbital">
+            <div class="orbital-core">
+              <strong id="heroScore">0.000</strong>
+              <span>Risk pulse</span>
+            </div>
+            <div class="ring ring-a"></div>
+            <div class="ring ring-b"></div>
+            <div class="ring ring-c"></div>
+          </div>
+          <div class="signal-grid">
+            <div class="signal-chip">
+              <span>Status</span>
+              <strong id="heroLevel">NORMAL</strong>
+            </div>
+            <div class="signal-chip">
+              <span>Mode</span>
+              <strong id="heroMode">None</strong>
+            </div>
+            <div class="signal-chip">
+              <span>Confidence</span>
+              <strong id="heroConfidence">0%</strong>
+            </div>
+            <div class="signal-chip">
+              <span>Threshold</span>
+              <strong>{{ threshold }}</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="dashboard-grid">
+        <section class="control-shell glass-panel">
+          <div class="section-topline">
+            <div>
+              <p class="eyebrow">Input Surface</p>
+              <h3>Scenario Builder</h3>
+            </div>
+            <div class="tab-row">
+              <button class="tab-button active" type="button" data-tab="manual">Manual</button>
+              <button class="tab-button" type="button" data-tab="batch">Batch</button>
+            </div>
+          </div>
+
+          <div class="tab-panel active" data-panel="manual">
+            <div class="section-split">
+              <section class="form-panel sub-panel">
+                <div class="sub-panel-head">
+                  <div>
+                    <p class="eyebrow">Sensor Feed</p>
+                    <h4>Raw telemetry</h4>
+                  </div>
+                </div>
+                <div class="field-grid compact">
+                  {% for key, value in raw_defaults.items() %}
+                  <label class="field">
+                    <span>{{ key }}</span>
+                    <input data-group="raw" data-key="{{ key }}" type="number" step="0.001" value="{{ value }}">
+                  </label>
+                  {% endfor %}
+                </div>
+              </section>
+
+              <section class="form-panel sub-panel">
+                <div class="sub-panel-head">
+                  <div>
+                    <p class="eyebrow">Feature Layer</p>
+                    <h4>Derived overrides</h4>
+                  </div>
+                  <span class="micro-tag">Auto-derived unless edited</span>
+                </div>
+                <div class="field-grid compact">
+                  {% for key, value in feature_defaults.items() %}
+                  <label class="field">
+                    <span>{{ key }}</span>
+                    <input data-group="feature" data-key="{{ key }}" type="number" step="0.001" value="{{ value }}">
+                  </label>
+                  {% endfor %}
+                </div>
+              </section>
+            </div>
+
+            <div class="action-strip">
+              <label class="field timestamp-field">
+                <span>Timestamp</span>
+                <input id="timestamp" type="text" placeholder="2026-04-08 14:30:00">
+              </label>
+              <button id="predictButton" class="primary-button" type="button">Analyze Case</button>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-panel="batch">
+            <div class="batch-shell">
+              <div class="batch-banner">
+                <div>
+                  <p class="eyebrow">Dataset Intake</p>
+                  <h4>CSV surveillance lane</h4>
+                </div>
+                <p class="muted">Upload a CSV with the model feature columns and optionally a `timestamp` column for timeline labeling.</p>
+              </div>
+
+              <div class="upload-box">
+                <input id="csvInput" type="file" accept=".csv">
+                <button id="batchButton" class="secondary-button" type="button">Run Batch Scoring</button>
+              </div>
+
+              <div id="batchSummary" class="batch-summary empty-panel">No batch run yet.</div>
+              <div id="batchPreview" class="preview-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="results-shell">
+          <section class="glass-panel result-shell">
+            <div class="section-topline">
+              <div>
+                <p class="eyebrow">Live Output</p>
+                <h3>Risk verdict</h3>
+              </div>
+              <div id="statusBadge" class="status-badge normal">Awaiting input</div>
+            </div>
+
+            <div class="result-orbit">
+              <svg viewBox="0 0 220 220" class="score-orbit" aria-hidden="true">
+                <circle cx="110" cy="110" r="88" class="orbit-track"></circle>
+                <circle cx="110" cy="110" r="88" class="orbit-progress" id="orbitProgress"></circle>
+              </svg>
+              <div class="orbit-content">
+                <strong id="scoreValue">0.000</strong>
+                <span>RailSense score</span>
+              </div>
+            </div>
+
+            <div class="info-grid">
+              <div class="info-card">
+                <span>Confidence</span>
+                <strong id="confidenceValue">0%</strong>
+              </div>
+              <div class="info-card">
+                <span>Dominant mode</span>
+                <strong id="failureModeValue">None</strong>
+              </div>
+            </div>
+
+            <div class="recommendation-card">
+              <span>Recommended action</span>
+              <strong id="actionValue">Run an analysis to surface guidance.</strong>
+            </div>
+          </section>
+
+          <section class="glass-panel analytics-shell">
+            <div class="section-topline">
+              <div>
+                <p class="eyebrow">Signal Anatomy</p>
+                <h3>Component blend</h3>
+              </div>
+            </div>
+            <div id="componentBars" class="bars"></div>
+            <div class="mini-chart-shell">
+              <div class="mini-chart-head">
+                <span>Signal tension map</span>
+                <strong id="tensionLabel">Idle</strong>
+              </div>
+              <canvas id="signalCanvas" width="320" height="120"></canvas>
+            </div>
+          </section>
+
+          <section class="glass-panel signal-shell">
+            <div class="section-topline">
+              <div>
+                <p class="eyebrow">Top Drivers</p>
+                <h3>Physics triggers</h3>
+              </div>
+            </div>
+            <div id="signalsList" class="signal-list empty-panel">Top physics signals will appear here.</div>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    window.APP_DEFAULTS = {
+      raw: {{ raw_defaults|tojson }},
+      features: {{ feature_defaults|tojson }}
+    };
+  </script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
