@@ -1,0 +1,9 @@
+{
+  "name": "railsenseai-fullstack",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "vercel-build": "npm --prefix frontend ci && npm --prefix frontend run build",
+    "build": "npm run vercel-build"
+  }
+}

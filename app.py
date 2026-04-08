@@ -15,7 +15,9 @@ from ptad_runtime import PTADv2Runtime
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "ptad_v2_4_tuned.pkl"
-FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+FRONTEND_DIST = BASE_DIR / "public"
+if not FRONTEND_DIST.exists():
+    FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 sys.modules["cloudpickle"] = bundled_cloudpickle
 sys.modules["cloudpickle.cloudpickle"] = bundled_cloudpickle_impl
@@ -231,7 +233,7 @@ def serve_asset(asset_path: str):
 def serve_frontend(path: str):
     if not FRONTEND_DIST.exists():
         return (
-            "Frontend build not found. Run `npm run build` inside `frontend` to generate `frontend/dist`.",
+            "Frontend build not found. Run `npm run build` from project root to generate the UI bundle.",
             503,
         )
 
