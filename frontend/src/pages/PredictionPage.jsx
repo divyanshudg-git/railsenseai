@@ -4,7 +4,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { motion as Motion } from 'framer-motion';
 import { z } from 'zod';
-import { CheckCircle2, Gauge, History, TriangleAlert, Upload, WandSparkles } from 'lucide-react';
+import { CheckCircle2, Download, Gauge, History, TriangleAlert, Upload, WandSparkles } from 'lucide-react';
 import { getConfig, predictBatch, predictSingle } from '../lib/api';
 import { CinematicSection } from '../components/CinematicSection';
 import { PageTransition } from '../components/PageTransition';
@@ -47,6 +47,55 @@ const FALLBACK_FEATURES = {
 
 const HISTORY_STORAGE_KEY = 'railsense.prediction.history.v1';
 const HISTORY_LIMIT = 48;
+const SAMPLE_BATCH_FILENAME = 'railsense_batch_sample.csv';
+
+const SAMPLE_BATCH_COLUMNS = [
+  'pressure_diff',
+  'LPS_freq_10min',
+  'sensor_divergence',
+  'compressor_efficiency',
+  'duty_cycle_5min',
+  'thermal_index',
+  'reservoir_panel_ratio',
+  'pressure_variance_10min',
+  'motor_thermal_stress',
+  'current_spike_freq',
+  'load_cycle_regularity',
+  'towers_switching_freq',
+  'comp_mpg_disagreement',
+  'TP2',
+  'TP3',
+  'H1',
+  'DV_pressure',
+  'Reservoirs',
+  'Oil_temperature',
+  'Motor_current',
+  'timestamp',
+];
+
+const SAMPLE_BATCH_ROW = {
+  pressure_diff: 0.02,
+  LPS_freq_10min: 0.02,
+  sensor_divergence: 0.15,
+  compressor_efficiency: 0.0045,
+  duty_cycle_5min: 0.84,
+  thermal_index: 0.48,
+  reservoir_panel_ratio: 0.98,
+  pressure_variance_10min: 3.8,
+  motor_thermal_stress: 0.35,
+  current_spike_freq: 0.08,
+  load_cycle_regularity: 0.72,
+  towers_switching_freq: 0.05,
+  comp_mpg_disagreement: 0,
+  TP2: 8.2,
+  TP3: 8.0,
+  H1: 8.1,
+  DV_pressure: 8.3,
+  Reservoirs: 8.1,
+  Oil_temperature: 62,
+  Motor_current: 4.2,
+  timestamp: '2026-04-08 10:00:00',
+};
 
 const signalNameMap = {
   P1_duty: 'Running continuously for too long',
@@ -138,6 +187,21 @@ function historyDotTone(level) {
   if (level === 'CRITICAL') return 'bg-rose-300';
   if (level === 'WARNING') return 'bg-amber-300';
   return 'bg-emerald-300';
+}
+
+function toCsvCell(value) {
+  if (value === null || value === undefined) return '';
+  const text = String(value);
+  if (text.includes(',') || text.includes('"') || text.includes('\n')) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function buildSampleBatchCsv() {
+  const header = SAMPLE_BATCH_COLUMNS.join(',');
+  const row = SAMPLE_BATCH_COLUMNS.map((column) => toCsvCell(SAMPLE_BATCH_ROW[column])).join(',');
+  return `${header}\n${row}\n`;
 }
 
 function createHistoryId() {
@@ -451,6 +515,20 @@ export function PredictionPage() {
     event.preventDefault();
     if (!selectedFile) return;
     batchMutation.mutate(selectedFile);
+  }
+
+  function downloadSampleBatchCsv() {
+    if (typeof window === 'undefined') return;
+    const csv = buildSampleBatchCsv();
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = SAMPLE_BATCH_FILENAME;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   }
 
   return (
@@ -882,6 +960,14 @@ export function PredictionPage() {
             Upload a CSV to score many rows at once. This section is intended for technical or data teams.
           </p>
           <div className="mt-5 flex flex-wrap items-center gap-4">
+            <button
+              type="button"
+              onClick={downloadSampleBatchCsv}
+              className="inline-flex items-center gap-2 rounded-full border border-cyan-200/25 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
+            >
+              <Download className="h-4 w-4" />
+              Download Sample CSV
+            </button>
             <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-white/20 bg-white/5 px-4 py-2 text-sm text-slate-100 transition hover:bg-white/10">
               <Upload className="h-4 w-4" />
               <span>{selectedFile?.name || 'Choose CSV file'}</span>
