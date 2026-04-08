@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "vercel-build": "npm --prefix frontend ci && npm --prefix frontend run build",
+    "vercel-build": "npm --prefix frontend ci && npm --prefix frontend run build && node -e \"const fs=require('fs'); const path=require('path'); fs.rmSync('public',{recursive:true,force:true}); fs.mkdirSync('public',{recursive:true}); fs.cpSync(path.join('frontend','dist'),'public',{recursive:true});\"",
     "build": "npm run vercel-build"
   }
 }
