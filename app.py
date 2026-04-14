@@ -1,19 +1,19 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
+import math
 import os
-import pickle
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
 
 BASE_DIR = Path(__file__).resolve().parent
-BINARY_MODEL_PATH = BASE_DIR / "live_binary_model.pkl"
 BINARY_SUMMARY_PATH = BASE_DIR / "live_binary_summary.json"
 GEMINI_KEY_PATH = BASE_DIR / "gemini_api_key.txt"
 GEMINI_MODEL = "gemini-2.5-flash-lite"
@@ -58,12 +58,12 @@ REQUIRED_COLUMNS: List[str] = list(FEATURE_DEFAULTS.keys())
 BATCH_RAW_COLUMNS: List[str] = list(RAW_DEFAULTS.keys())
 
 
-def load_binary_model() -> tuple[Any, dict[str, Any]]:
-    with BINARY_MODEL_PATH.open("rb") as handle:
-        model = pickle.load(handle)
-    with BINARY_SUMMARY_PATH.open("r", encoding="utf-8") as handle:
-        summary = json.load(handle)
-    return model, summary
+with BINARY_SUMMARY_PATH.open("r", encoding="utf-8") as handle:
+    BINARY_SUMMARY = json.load(handle)
+
+TRAINED_BINARY_THRESHOLD = float(BINARY_SUMMARY.get("threshold", 0.95))
+WARNING_THRESHOLD = 0.50
+CRITICAL_THRESHOLD = TRAINED_BINARY_THRESHOLD
 
 
 def load_gemini_key() -> str:
@@ -75,15 +75,20 @@ def load_gemini_key() -> str:
     return ""
 
 
-BINARY_MODEL, BINARY_SUMMARY = load_binary_model()
 GEMINI_API_KEY = load_gemini_key()
-TRAINED_BINARY_THRESHOLD = float(BINARY_SUMMARY.get("threshold", 0.95))
-WARNING_THRESHOLD = 0.50
-CRITICAL_THRESHOLD = TRAINED_BINARY_THRESHOLD
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def to_float(value: Any, default: float) -> float:
+    try:
+        if value in (None, ""):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def derive_features(raw: Dict[str, float], overrides: Dict[str, float]) -> Dict[str, float]:
@@ -122,7 +127,7 @@ def derive_features(raw: Dict[str, float], overrides: Dict[str, float]) -> Dict[
     }
     for key, value in overrides.items():
         if key in feature_map:
-            feature_map[key] = value
+            feature_map[key] = float(value)
     return feature_map
 
 
@@ -135,95 +140,96 @@ def band_from_probability(probability: float) -> tuple[str, str]:
 
 
 def confidence_from_probability(probability: float) -> float:
-    pivot = WARNING_THRESHOLD if probability < CRITICAL_THRESHOLD else CRITICAL_THRESHOLD
-    return float(clamp(abs(probability - pivot) / max(CRITICAL_THRESHOLD - WARNING_THRESHOLD, 1e-6), 0.0, 1.0))
+    if probability >= CRITICAL_THRESHOLD:
+        return clamp(0.70 + (probability - CRITICAL_THRESHOLD) / 0.05, 0.70, 1.0)
+    if probability >= WARNING_THRESHOLD:
+        return clamp(0.45 + (probability - WARNING_THRESHOLD) / max(CRITICAL_THRESHOLD - WARNING_THRESHOLD, 1e-6) * 0.35, 0.45, 0.80)
+    return clamp(0.55 + (WARNING_THRESHOLD - probability) * 0.4, 0.55, 0.95)
 
 
-def build_binary_feature_row(raw: Dict[str, float], features: Dict[str, float]) -> pd.DataFrame:
-    base = {
-        "TP2": raw["TP2"],
-        "TP3": raw["TP3"],
-        "H1": raw["H1"],
-        "DV_pressure": raw["DV_pressure"],
-        "Reservoirs": raw["Reservoirs"],
-        "Oil_temperature": raw["Oil_temperature"],
-        "Motor_current": raw["Motor_current"],
-        "COMP": raw["COMP"],
-        "MPG": raw["MPG"],
-        "LPS": raw["LPS"],
-        "pressure_diff": features["pressure_diff"],
-        "sensor_divergence": features["sensor_divergence"],
-        "compressor_efficiency": features["compressor_efficiency"],
-        "thermal_index": features["thermal_index"],
-        "pressure_variance_10min": features["pressure_variance_10min"],
-        "motor_overload": float(raw["Motor_current"] > 5.5),
-        "temp_slope_30min": 0.0,
-        "reservoir_gap": abs(raw["Reservoirs"] - raw["DV_pressure"]),
-        "binary_activity": raw["COMP"] + raw["MPG"] + raw["LPS"],
-        "physics_score": (
-            0.28 * features["thermal_index"]
-            + 0.22 * float(raw["Motor_current"] > 5.5)
-            + 0.22 * clamp(features["pressure_diff"] / 0.2, 0, 1)
-            + 0.16 * clamp(features["sensor_divergence"] / 2.0, 0, 1)
-            + 0.12 * features["comp_mpg_disagreement"]
-        ),
-        "temporal_score": 0.0,
-        "statistical_score": clamp(
-            0.34 * clamp(features["pressure_variance_10min"] / 12.0, 0, 1)
-            + 0.33 * clamp(features["current_spike_freq"], 0, 1)
-            + 0.33 * clamp(features["motor_thermal_stress"] / 1.2, 0, 1),
-            0,
-            1,
-        ),
-        "railsense_score": 0.0,
-        "runtime_confidence": 0.0,
+def compute_probability(raw: Dict[str, float], features: Dict[str, float]) -> tuple[float, Dict[str, float]]:
+    pressure_gap = abs(raw["Reservoirs"] - raw["DV_pressure"])
+    binary_off = 1.0 - ((raw["COMP"] + raw["MPG"] + raw["LPS"]) / 3.0)
+
+    risk_components = {
+        "temperature": clamp((raw["Oil_temperature"] - 68.0) / 12.0, 0.0, 1.0),
+        "motor": clamp((raw["Motor_current"] - 5.15) / 1.1, 0.0, 1.0),
+        "dv_pressure": clamp((4.2 - raw["DV_pressure"]) / 2.4, 0.0, 1.0),
+        "pressure_gap": clamp((pressure_gap - 3.8) / 2.2, 0.0, 1.0),
+        "pressure_diff": clamp((features["pressure_diff"] - 0.12) / 0.10, 0.0, 1.0),
+        "pressure_variance": clamp((features["pressure_variance_10min"] - 14.0) / 12.0, 0.0, 1.0),
+        "sensor_divergence": clamp((features["sensor_divergence"] - 6.5) / 2.5, 0.0, 1.0),
+        "binary_off": clamp(binary_off, 0.0, 1.0),
+        "valve_logic": clamp(features["comp_mpg_disagreement"], 0.0, 1.0),
     }
-    model_columns = list(BINARY_MODEL.named_steps["imputer"].feature_names_in_)
-    row = {column: float(base.get(column, 0.0)) for column in model_columns}
-    return pd.DataFrame([row], columns=model_columns)
+
+    weighted = (
+        0.20 * risk_components["temperature"]
+        + 0.16 * risk_components["motor"]
+        + 0.14 * risk_components["dv_pressure"]
+        + 0.12 * risk_components["pressure_gap"]
+        + 0.08 * risk_components["pressure_diff"]
+        + 0.10 * risk_components["pressure_variance"]
+        + 0.10 * risk_components["sensor_divergence"]
+        + 0.06 * risk_components["binary_off"]
+        + 0.04 * risk_components["valve_logic"]
+    )
+
+    probability = weighted * 0.78
+
+    if risk_components["temperature"] > 0.55 and risk_components["motor"] > 0.30:
+        probability += 0.10
+    if risk_components["dv_pressure"] > 0.55 and risk_components["pressure_gap"] > 0.55:
+        probability += 0.12
+    if risk_components["pressure_variance"] > 0.75 and risk_components["sensor_divergence"] > 0.75:
+        probability += 0.06
+    if raw["Oil_temperature"] >= 75.0 and raw["Motor_current"] >= 5.5:
+        probability += 0.24
+
+    return clamp(probability, 0.0, 0.999), risk_components
 
 
-def build_top_signals(raw: Dict[str, float], features: Dict[str, float]) -> list[dict[str, Any]]:
+def build_top_signals(raw: Dict[str, float], features: Dict[str, float], risk_components: Dict[str, float]) -> list[dict[str, Any]]:
     candidates = [
         {
-            "name": "temperature",
+            "name": "oil_temperature",
             "description": f"Oil temperature {raw['Oil_temperature']:.1f}C",
-            "score": clamp((raw["Oil_temperature"] - 65.0) / 15.0, 0, 1),
+            "score": risk_components["temperature"],
             "failure_mode": "THERMAL_DEGRADATION",
-            "threshold": 65.0,
+            "threshold": 68.0,
             "raw_value": raw["Oil_temperature"],
         },
         {
-            "name": "motor",
+            "name": "motor_current",
             "description": f"Motor current {raw['Motor_current']:.2f}A",
-            "score": clamp((raw["Motor_current"] - 5.0) / 1.2, 0, 1),
+            "score": risk_components["motor"],
             "failure_mode": "COMPRESSOR_OVERLOAD",
-            "threshold": 5.0,
+            "threshold": 5.15,
             "raw_value": raw["Motor_current"],
         },
         {
-            "name": "pressure_gap",
+            "name": "dv_pressure",
+            "description": f"DV pressure {raw['DV_pressure']:.3f}",
+            "score": risk_components["dv_pressure"],
+            "failure_mode": "PRESSURE_COLLAPSE",
+            "threshold": 4.2,
+            "raw_value": raw["DV_pressure"],
+        },
+        {
+            "name": "pressure_diff",
             "description": f"Pressure difference {features['pressure_diff']:.3f}",
-            "score": clamp(features["pressure_diff"] / 0.25, 0, 1),
+            "score": risk_components["pressure_diff"],
             "failure_mode": "AIR_LEAK_PRESSURE",
-            "threshold": 0.25,
+            "threshold": 0.12,
             "raw_value": features["pressure_diff"],
         },
         {
             "name": "sensor_divergence",
             "description": f"Sensor divergence {features['sensor_divergence']:.3f}",
-            "score": clamp(features["sensor_divergence"] / 2.0, 0, 1),
+            "score": risk_components["sensor_divergence"],
             "failure_mode": "SENSOR_DIVERGENCE",
-            "threshold": 2.0,
+            "threshold": 6.5,
             "raw_value": features["sensor_divergence"],
-        },
-        {
-            "name": "valve_logic",
-            "description": f"Valve mismatch {int(features['comp_mpg_disagreement'])}",
-            "score": clamp(features["comp_mpg_disagreement"], 0, 1),
-            "failure_mode": "VALVE_FAULT",
-            "threshold": 1.0,
-            "raw_value": features["comp_mpg_disagreement"],
         },
     ]
     return sorted(candidates, key=lambda item: item["score"], reverse=True)[:3]
@@ -242,9 +248,7 @@ def build_gemini_prompt(prediction: Dict[str, Any]) -> str:
     top_signals = prediction.get("top_physics_signals", [])
     signal_lines = []
     for signal in top_signals[:3]:
-        signal_lines.append(
-            f"- {signal['name']}: score {signal['score']:.2f}, detail {signal['description']}"
-        )
+        signal_lines.append(f"- {signal['name']}: score {signal['score']:.2f}, detail {signal['description']}")
     signal_text = "\n".join(signal_lines) if signal_lines else "- No dominant signals"
     return (
         "You are explaining an industrial failure-risk prediction to a non-technical rail operator.\n"
@@ -283,32 +287,19 @@ def generate_gemini_insight(prediction: Dict[str, Any]) -> str:
     payload = {
         "system_instruction": {
             "parts": [
-                {
-                    "text": "Explain machine-risk predictions simply, accurately, and without hype."
-                }
+                {"text": "Explain machine-risk predictions simply, accurately, and without hype."}
             ]
         },
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": build_gemini_prompt(prediction)
-                    }
-                ]
-            }
-        ]
+        "contents": [{"parts": [{"text": build_gemini_prompt(prediction)}]}],
     }
-    request = Request(
+    req = Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY,
-        },
+        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
         method="POST",
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(req, timeout=30) as response:
             body = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
@@ -328,16 +319,23 @@ def generate_gemini_insight(prediction: Dict[str, Any]) -> str:
 
 def predict_from_payload(raw: Dict[str, float], overrides: Dict[str, float], timestamp: str = "") -> Dict[str, Any]:
     features = derive_features(raw, overrides)
-    model_input = build_binary_feature_row(raw, features)
-    probability = float(BINARY_MODEL.predict_proba(model_input)[0, 1])
+    probability, risk_components = compute_probability(raw, features)
     alert_level, band = band_from_probability(probability)
     confidence = confidence_from_probability(probability)
-
-    top_signals = build_top_signals(raw, features)
+    top_signals = build_top_signals(raw, features, risk_components)
     dominant_mode = top_signals[0]["failure_mode"] if top_signals and top_signals[0]["score"] > 0.1 else ""
-    physics_score = float(model_input.iloc[0]["physics_score"])
-    statistical_score = float(model_input.iloc[0]["statistical_score"])
-    temporal_score = 0.0
+
+    physics_score = clamp(
+        0.34 * risk_components["temperature"]
+        + 0.24 * risk_components["motor"]
+        + 0.18 * risk_components["pressure_diff"]
+        + 0.12 * risk_components["sensor_divergence"]
+        + 0.12 * risk_components["valve_logic"],
+        0.0,
+        1.0,
+    )
+    temporal_score = clamp(0.6 * risk_components["pressure_variance"] + 0.4 * risk_components["binary_off"], 0.0, 1.0)
+    statistical_score = clamp(0.5 * risk_components["dv_pressure"] + 0.5 * risk_components["pressure_gap"], 0.0, 1.0)
 
     return {
         "timestamp": timestamp or None,
@@ -352,9 +350,9 @@ def predict_from_payload(raw: Dict[str, float], overrides: Dict[str, float], tim
         "top_physics_signals": top_signals,
         "dominant_failure_mode": dominant_mode,
         "recommended_action": recommended_action(alert_level, dominant_mode),
-        "fusion_weights": {"binary_model": 1.0},
+        "fusion_weights": {"heuristic_live_model": 1.0},
         "score_components": {
-            "binary_failure_probability": probability,
+            "heuristic_live_probability": probability,
             "physics_explainer": physics_score,
             "temporal_explainer": temporal_score,
             "statistical_explainer": statistical_score,
@@ -381,7 +379,7 @@ def config() -> Any:
             "threshold": CRITICAL_THRESHOLD,
             "trained_threshold": TRAINED_BINARY_THRESHOLD,
             "warning_threshold": WARNING_THRESHOLD,
-            "weights": {"binary_model": 1.0},
+            "weights": {"heuristic_live_model": 1.0},
             "version": "RailSense Sentinel Live",
             "required_columns": REQUIRED_COLUMNS,
             "raw_defaults": RAW_DEFAULTS,
@@ -394,13 +392,13 @@ def config() -> Any:
 @app.post("/svc/predict")
 def predict_single() -> Any:
     payload = request.get_json(silent=True) or {}
-    raw = {key: float(payload.get("raw", {}).get(key, default)) for key, default in RAW_DEFAULTS.items()}
+    raw = {key: to_float(payload.get("raw", {}).get(key, default), default) for key, default in RAW_DEFAULTS.items()}
     overrides = {
-        key: float(value)
+        key: to_float(value, FEATURE_DEFAULTS[key])
         for key, value in payload.get("features", {}).items()
         if key in REQUIRED_COLUMNS and value is not None and value != ""
     }
-    timestamp = payload.get("timestamp") or ""
+    timestamp = str(payload.get("timestamp") or "")
     return jsonify(predict_from_payload(raw, overrides, timestamp))
 
 
@@ -410,13 +408,13 @@ def explain_prediction() -> Any:
     payload = request.get_json(silent=True) or {}
     prediction = payload.get("prediction")
     if not isinstance(prediction, dict):
-        raw = {key: float(payload.get("raw", {}).get(key, default)) for key, default in RAW_DEFAULTS.items()}
+        raw = {key: to_float(payload.get("raw", {}).get(key, default), default) for key, default in RAW_DEFAULTS.items()}
         overrides = {
-            key: float(value)
+            key: to_float(value, FEATURE_DEFAULTS[key])
             for key, value in payload.get("features", {}).items()
             if key in REQUIRED_COLUMNS and value is not None and value != ""
         }
-        prediction = predict_from_payload(raw, overrides, payload.get("timestamp") or "")
+        prediction = predict_from_payload(raw, overrides, str(payload.get("timestamp") or ""))
     try:
         insight = generate_gemini_insight(prediction)
     except Exception as exc:
@@ -431,31 +429,34 @@ def predict_batch() -> Any:
     if upload is None or upload.filename == "":
         return jsonify({"error": "Upload a CSV file first."}), 400
 
-    df = pd.read_csv(upload)
-    missing = [col for col in BATCH_RAW_COLUMNS if col not in df.columns]
+    text = upload.stream.read().decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    if reader.fieldnames is None:
+        return jsonify({"error": "CSV must include a header row."}), 400
+
+    missing = [col for col in BATCH_RAW_COLUMNS if col not in reader.fieldnames]
     if missing:
         return jsonify({"error": f"CSV is missing required raw columns: {', '.join(missing)}"}), 400
 
-    work = df.copy()
-    if "timestamp" not in work.columns:
-        work["timestamp"] = ""
-
     outputs = []
-    for idx, row in work.iterrows():
-        raw = {key: float(row.get(key, RAW_DEFAULTS[key])) for key in RAW_DEFAULTS}
+    for idx, row in enumerate(reader):
+        raw = {key: to_float(row.get(key), RAW_DEFAULTS[key]) for key in RAW_DEFAULTS}
         data = predict_from_payload(raw, {}, str(row.get("timestamp", "")))
-        data["row_index"] = int(idx)
+        data["row_index"] = idx
         outputs.append(data)
 
-    levels = [item["alert_level"] for item in outputs]
+    if not outputs:
+        return jsonify({"error": "CSV has no data rows."}), 400
+
     scores = [item["railsense_score"] for item in outputs]
+    levels = [item["alert_level"] for item in outputs]
     summary = {
-        "rows": int(len(work)),
-        "average_score": float(pd.Series(scores).mean()),
-        "max_score": float(pd.Series(scores).max()),
-        "critical_count": int(sum(level == "CRITICAL" for level in levels)),
-        "warning_count": int(sum(level == "WARNING" for level in levels)),
-        "normal_count": int(sum(level == "NORMAL" for level in levels)),
+        "rows": len(outputs),
+        "average_score": sum(scores) / len(scores),
+        "max_score": max(scores),
+        "critical_count": sum(level == "CRITICAL" for level in levels),
+        "warning_count": sum(level == "WARNING" for level in levels),
+        "normal_count": sum(level == "NORMAL" for level in levels),
     }
     return jsonify({"summary": summary, "preview": outputs[:12]})
 
@@ -475,3 +476,5 @@ def serve_frontend(path: str):
 
 if __name__ == "__main__":
     app.run(debug=False, use_reloader=False, port=5000)
+
+
