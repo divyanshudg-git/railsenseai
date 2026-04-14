@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { motion as Motion } from 'framer-motion';
-import { Sparkles, Radar } from 'lucide-react';
+import { Radar } from 'lucide-react';
 
 const links = [
   { to: '/', label: 'Home' },
@@ -50,14 +50,6 @@ export function NavBar() {
             </NavLink>
           ))}
         </div>
-
-        <NavLink
-          to="/prediction"
-          className="inline-flex items-center gap-2 rounded-full border border-cyan-200/30 bg-cyan-300/15 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/25"
-        >
-          <Sparkles className="h-4 w-4" />
-          Live Demo
-        </NavLink>
       </nav>
     </header>
   );
