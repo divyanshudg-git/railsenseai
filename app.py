@@ -17,6 +17,8 @@ BASE_DIR = Path(__file__).resolve().parent
 BINARY_SUMMARY_PATH = BASE_DIR / "live_binary_summary.json"
 GEMINI_KEY_PATH = BASE_DIR / "gemini_api_key.txt"
 GEMINI_MODEL = "gemini-2.5-flash-lite"
+MAX_BATCH_ROWS = 100
+MAX_BATCH_FILE_BYTES = 1_000_000
 
 RAW_DEFAULTS: Dict[str, float] = {
     "TP2": 8.2,
@@ -279,6 +281,32 @@ def build_gemini_prompt(prediction: Dict[str, Any]) -> str:
     )
 
 
+def build_batch_gemini_prompt(summary: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
+    top_rows = sorted(rows, key=lambda item: item.get("risk_score", 0.0), reverse=True)[:3]
+    top_lines = []
+    for row in top_rows:
+        top_lines.append(
+            f"- row {row['row_index'] + 1}: {row['label']} with risk {row['risk_score']:.3f}"
+        )
+    top_text = "\n".join(top_lines) if top_lines else "- No rows found"
+    return (
+        "You are explaining a batch machine-risk prediction result to a non-technical operator.\n"
+        "Write one short paragraph only.\n"
+        "Maximum 75 words.\n"
+        "Use plain language.\n"
+        "Mention how many rows are normal, warning, and critical, and what action is recommended.\n"
+        "Do not use bullet points.\n\n"
+        f"Total rows: {summary['rows']}\n"
+        f"Normal rows: {summary['normal_count']}\n"
+        f"Warning rows: {summary['warning_count']}\n"
+        f"Critical rows: {summary['critical_count']}\n"
+        f"Average risk score: {summary['average_score']:.3f}\n"
+        f"Maximum risk score: {summary['max_score']:.3f}\n"
+        "Top risky rows:\n"
+        f"{top_text}"
+    )
+
+
 def generate_gemini_insight(prediction: Dict[str, Any]) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("Gemini API key not configured.")
@@ -291,6 +319,42 @@ def generate_gemini_insight(prediction: Dict[str, Any]) -> str:
             ]
         },
         "contents": [{"parts": [{"text": build_gemini_prompt(prediction)}]}],
+    }
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Gemini API error: {detail or exc.reason}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Gemini network error: {exc.reason}") from exc
+
+    candidates = body.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+    if not text.strip():
+        raise RuntimeError("Gemini returned an empty explanation.")
+    return text.strip()
+
+
+def generate_batch_gemini_insight(summary: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Gemini API key not configured.")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": "Explain batch machine-risk predictions simply, accurately, and without hype."}]
+        },
+        "contents": [{"parts": [{"text": build_batch_gemini_prompt(summary, rows)}]}],
     }
     req = Request(
         url,
@@ -364,6 +428,16 @@ def predict_from_payload(raw: Dict[str, float], overrides: Dict[str, float], tim
     }
 
 
+def sort_batch_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def key_fn(row: Dict[str, Any]) -> tuple[int, str, int]:
+        timestamp = str(row.get("timestamp") or "").strip()
+        if timestamp:
+            return (0, timestamp, int(row.get("row_index", 0)))
+        return (1, "", int(row.get("row_index", 0)))
+
+    return sorted(rows, key=key_fn)
+
+
 app = Flask(__name__)
 
 
@@ -384,6 +458,10 @@ def config() -> Any:
             "required_columns": REQUIRED_COLUMNS,
             "raw_defaults": RAW_DEFAULTS,
             "feature_defaults": FEATURE_DEFAULTS,
+            "batch_limits": {
+                "max_rows": MAX_BATCH_ROWS,
+                "max_file_bytes": MAX_BATCH_FILE_BYTES,
+            },
         }
     )
 
@@ -429,7 +507,11 @@ def predict_batch() -> Any:
     if upload is None or upload.filename == "":
         return jsonify({"error": "Upload a CSV file first."}), 400
 
-    text = upload.stream.read().decode("utf-8-sig")
+    raw_bytes = upload.stream.read()
+    if len(raw_bytes) > MAX_BATCH_FILE_BYTES:
+        return jsonify({"error": f"CSV file must be under {MAX_BATCH_FILE_BYTES // 1000} KB."}), 400
+
+    text = raw_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None:
         return jsonify({"error": "CSV must include a header row."}), 400
@@ -440,16 +522,27 @@ def predict_batch() -> Any:
 
     outputs = []
     for idx, row in enumerate(reader):
+        if idx >= MAX_BATCH_ROWS:
+            return jsonify({"error": f"CSV can contain at most {MAX_BATCH_ROWS} data rows."}), 400
         raw = {key: to_float(row.get(key), RAW_DEFAULTS[key]) for key in RAW_DEFAULTS}
         data = predict_from_payload(raw, {}, str(row.get("timestamp", "")))
-        data["row_index"] = idx
-        outputs.append(data)
+        outputs.append(
+            {
+                "row_index": idx,
+                "timestamp": str(row.get("timestamp", "")),
+                **raw,
+                "label": data["alert_level"],
+                "risk_score": data["railsense_score"],
+                "confidence": data["confidence"],
+            }
+        )
 
     if not outputs:
         return jsonify({"error": "CSV has no data rows."}), 400
 
-    scores = [item["railsense_score"] for item in outputs]
-    levels = [item["alert_level"] for item in outputs]
+    outputs = sort_batch_rows(outputs)
+    scores = [item["risk_score"] for item in outputs]
+    levels = [item["label"] for item in outputs]
     summary = {
         "rows": len(outputs),
         "average_score": sum(scores) / len(scores),
@@ -458,7 +551,22 @@ def predict_batch() -> Any:
         "warning_count": sum(level == "WARNING" for level in levels),
         "normal_count": sum(level == "NORMAL" for level in levels),
     }
-    return jsonify({"summary": summary, "preview": outputs[:12]})
+    return jsonify({"summary": summary, "rows": outputs})
+
+
+@app.post("/api/explain-batch")
+@app.post("/svc/explain-batch")
+def explain_batch() -> Any:
+    payload = request.get_json(silent=True) or {}
+    summary = payload.get("summary")
+    rows = payload.get("rows")
+    if not isinstance(summary, dict) or not isinstance(rows, list):
+        return jsonify({"error": "Batch summary and rows are required."}), 400
+    try:
+        insight = generate_batch_gemini_insight(summary, rows)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"insight": insight, "model": GEMINI_MODEL})
 
 
 @app.get("/", defaults={"path": ""})
